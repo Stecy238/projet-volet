@@ -1,0 +1,209 @@
+<?php
+// Connexion
+$pdo = new PDO("mysql:host=localhost;dbname=volet_db;charset=utf8", "root", "");
+
+// Création des tables
+$pdo->exec("
+CREATE TABLE IF NOT EXISTS mesures (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    temperature FLOAT,
+    luminosite INT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS courbe_luminosite (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    luminosite INT NOT NULL,
+    angle INT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mesures_angle (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    luminosite INT,
+    angle_calcule INT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+");
+
+// Insérer les valeurs dans la table courbe si vide
+$count = $pdo->query("SELECT COUNT(*) FROM courbe_luminosite")->fetchColumn();
+if ($count == 0) {
+    $pdo->exec("
+    INSERT INTO courbe_luminosite (luminosite, angle) VALUES
+    (0, 90),
+    (100, 79),
+    (200, 70),
+    (300, 61),
+    (400, 53),
+    (500, 44),
+    (600, 35),
+    (700, 26),
+    (800, 17),
+    (900, 9),
+    (1023, 0);
+    ");
+}
+
+// Fonction d’interpolation
+function getInterpolatedAngle($pdo, $lux) {
+    $stmt = $pdo->prepare("SELECT angle FROM courbe_luminosite WHERE luminosite = ?");
+    $stmt->execute([$lux]);
+    $exact = $stmt->fetchColumn();
+    if ($exact !== false) return (int)$exact;
+
+    $stmt1 = $pdo->prepare("SELECT luminosite, angle FROM courbe_luminosite WHERE luminosite <= ? ORDER BY luminosite DESC LIMIT 1");
+    $stmt2 = $pdo->prepare("SELECT luminosite, angle FROM courbe_luminosite WHERE luminosite >= ? ORDER BY luminosite ASC LIMIT 1");
+    $stmt1->execute([$lux]);
+    $stmt2->execute([$lux]);
+    $low = $stmt1->fetch(PDO::FETCH_ASSOC);
+    $high = $stmt2->fetch(PDO::FETCH_ASSOC);
+
+    if (!$low || !$high || $low['luminosite'] == $high['luminosite']) return 90;
+
+    $x0 = $low['luminosite'];
+    $y0 = $low['angle'];
+    $x1 = $high['luminosite'];
+    $y1 = $high['angle'];
+
+    return round($y0 + ($lux - $x0) * ($y1 - $y0) / ($x1 - $x0));
+}
+
+// Enregistrement des nouvelles valeurs via formulaire
+if (isset($_POST['new_temp'], $_POST['new_lux'])) {
+    $temp = floatval($_POST['new_temp']);
+    $lux = intval($_POST['new_lux']);
+    $angle = getInterpolatedAngle($pdo, $lux);
+
+    $pdo->prepare("INSERT INTO mesures (temperature, luminosite) VALUES (?, ?)")->execute([$temp, $lux]);
+    $pdo->prepare("INSERT INTO mesures_angle (luminosite, angle_calcule) VALUES (?, ?)")->execute([$lux, $angle]);
+
+    header("Location: ".$_SERVER['PHP_SELF']);
+    exit;
+}
+
+// Lecture de la dernière mesure
+$stmt = $pdo->query("SELECT temperature, luminosite FROM mesures ORDER BY timestamp DESC LIMIT 1");
+$data = $stmt->fetch(PDO::FETCH_ASSOC);
+$temp = $data ? floatval($data['temperature']) : null;
+$lux = $data ? intval($data['luminosite']) : null;
+$angle = $lux !== null ? getInterpolatedAngle($pdo, $lux) : 90;
+
+// Hauteur du volet selon l’angle : 0° = ouvert → 0%, 90° = fermé → 100%
+$voletHeight = round(($angle / 90) * 100);
+?>
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <title>Volet Roulant</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #eef2f7;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px;
+    }
+
+    h1 {
+      margin-bottom: 20px;
+      color: #333;
+    }
+
+    .temp-box {
+      font-size: 1.4em;
+      margin-bottom: 20px;
+      color: #222;
+      text-align: center;
+    }
+
+    .volet-container {
+      position: relative;
+      width: 220px;
+      height: 300px;
+      background: #ccc;
+      overflow: hidden;
+      border: 4px solid #aaa;
+      border-radius: 10px;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.2);
+      margin-bottom: 20px;
+    }
+
+    .volet {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      background: repeating-linear-gradient(to bottom, #444 0px, #666 10px, #444 20px);
+      height: var(--volet-height);
+      transition: height 1s ease-in-out;
+    }
+
+    .status {
+      font-size: 1.2em;
+      font-weight: bold;
+      margin-bottom: 30px;
+      text-align: center;
+    }
+
+    form {
+      text-align: center;
+      margin-top: 20px;
+    }
+
+    input[type="number"] {
+      padding: 10px;
+      font-size: 1em;
+      width: 150px;
+      border-radius: 5px;
+      border: 1px solid #aaa;
+      margin: 5px;
+    }
+
+    button {
+      padding: 10px 20px;
+      font-size: 1em;
+      background-color: #007BFF;
+      color: white;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background-color: #0056b3;
+    }
+
+    .note {
+      font-size: 0.9em;
+      color: #666;
+      margin-top: 10px;
+    }
+  </style>
+</head>
+<body>
+
+<h1>Volet Roulant Automatisé</h1>
+
+<div class="temp-box">
+  Température : <?= $temp !== null ? "$temp °C" : "<em>Non disponible</em>" ?><br>
+  Luminosité : <?= $lux !== null ? "$lux lux" : "<em>Non disponible</em>" ?>
+</div>
+
+<div class="volet-container">
+  <div class="volet" style="--volet-height: <?= $voletHeight ?>%;"></div>
+</div>
+
+<div class="status">
+  Angle d'ouverture : <?= $angle ?>°<br>
+  Volet <?= $angle == 0 ? "OUVERT 🔓" : ($angle == 90 ? "FERMÉ 🔒" : "partiellement fermé") ?>
+</div>
+
+<form method="post">
+  <h2>📥 Simuler une mesure</h2>
+  <input type="number" name="new_temp" step="0.1" min="-10" max="50" placeholder="Température (°C)" required><br>
+  <input type="number" name="new_lux" step="1" min="0" max="1023" placeholder="Luminosité (lux)" required><br><br>
+  <button type="submit">Soumettre</button>
+</form>
+
+</body>
+</html>
